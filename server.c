@@ -5,6 +5,7 @@
 
 #include <errno.h>
 #include <netdb.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -12,16 +13,27 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+
 // the default ulimit -Sn is usually 1024, but
 // take the default file descriptors into account
 #define BACKLOG_SIZE    1000
 #define DEFAULT_SERVICE "8080"
 
-#define E_NONE      0
-#define E_ADDRINFO  1
-#define E_SSOCKET   2
-#define E_SS_BIND   3
-#define E_SS_LISTEN 4
+#define E_NONE     0
+#define E_ADDRINFO 1
+#define E_SOCKET   2
+#define E_BIND     3
+#define E_LISTEN   4
+#define E_ACCEPT   5
+#define E_HANDLER  6
+
+
+// keep global state somewhere easy to find
+struct global_t {
+    // signal handlers do not have access to local variables
+    int stop_server;
+} globals;
+
 
 /**
  * Outputs a corresponding error message to stderr.
@@ -32,7 +44,7 @@ void error(int cat, int code) {
             fputs(gai_strerror(code), stderr);
             break;
 
-        case E_SSOCKET:
+        case E_SOCKET:
             fputs("Failed to open server socket", stderr);
             switch(code) {
                 case EACCES:
@@ -45,7 +57,7 @@ void error(int cat, int code) {
             }
             break;
 
-        case E_SS_BIND:
+        case E_BIND:
             fputs("Failed to bind server socket", stderr);
             switch(code) {
                 case EACCES:
@@ -57,10 +69,14 @@ void error(int cat, int code) {
             }
             break;
 
-        case E_SS_LISTEN:
+        case E_LISTEN:
             fputs("Failed to listen on server socket", stderr);
             if (code == EADDRINUSE)
                 fputs(": address already in use", stderr);
+            break;
+
+        case E_HANDLER:
+            fputs("Failed to set custom signal handlers", stderr);
             break;
     }
     fputc('\n', stderr);
@@ -109,19 +125,19 @@ int open_server_socket(char service[]) {
         fd = socket(aip->ai_family, aip->ai_socktype, aip->ai_protocol);
 
         if (fd < 0) {
-            error(E_SSOCKET, errno);
+            error(E_SOCKET, errno);
             aip = aip->ai_next;
             continue;
         }
 
         if (bind(fd, aip->ai_addr, aip->ai_addrlen) != 0) {
-            error(E_SS_BIND, errno);
+            error(E_BIND, errno);
             aip = aip->ai_next;
             continue;
         }
 
         if (listen(fd, BACKLOG_SIZE) != 0) {
-            error(E_SS_LISTEN, errno);
+            error(E_LISTEN, errno);
             aip = aip->ai_next;
             continue;
         }
@@ -136,17 +152,73 @@ int open_server_socket(char service[]) {
     return -1;
 }
 
+/**
+ * Prevents the server from accepting further requests.
+ */
+void stop_server() {
+    globals.stop_server = 1;
+    puts("stopping");
+}
+
+/**
+ * OS signal handler. Signal handlers execute as if the function was called
+ * immediately in one the available threads. Note that SIGKILL and SIGTERM
+ * cannot be caught or ignored.
+ */
+void handle_signal(int s) {
+    if (s == SIGINT)
+        stop_server();
+}
+
+/**
+ * Configures singal handlers (see signal(7)). The following singals are
+ * handled especially:
+ *
+ * SIGINT (2): stop the server cleanly
+ */
+void set_handlers() {
+    struct sigaction sa;
+
+    sa.sa_handler = &handle_signal;
+    sa.sa_restorer = NULL;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+
+    if(sigaction(SIGINT, &sa, NULL) != 0)
+        error(E_HANDLER, errno);
+}
+
+/**
+ * Handles a new client connection. At this point, it is still unknown if
+ * the client is actually sending an HTTP request. The current implementation
+ * will assume that the client is sending an HTTP request, and respond
+ * "Hello, world!" regardless.
+ */
+void handle_connection(int socket) {
+    char response[] = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
+    write(socket, response, sizeof(response));
+}
+
 int main(int argc, char** argv) {
-    int ssocket, socket;
+    int ssfd, sofd;
 
-    ssocket = open_server_socket((argc > 1) ? argv[1] : DEFAULT_SERVICE);
-    puts("server is ready");
+    ssfd = open_server_socket((argc > 1) ? argv[1] : DEFAULT_SERVICE);
+    puts("server started");
 
-    socket = accept(ssocket, NULL, NULL);
-    printf("%d\n", socket);
+    globals.stop_server = 0;
+    set_handlers();
 
-    close(socket);
-    close(ssocket);
+    while (!globals.stop_server) {
+        sofd = accept(ssfd, NULL, NULL);
+        if (sofd < 0)
+            break;
+
+        handle_connection(sofd);
+        close(sofd);
+    }
+
+    close(ssfd);
+    puts("server stopped");
     return 0;
 }
 
