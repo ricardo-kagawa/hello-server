@@ -39,44 +39,44 @@ struct global_vars {
  */
 void error(int cat, int code) {
     switch (cat) {
-        case E_ADDRINFO:
-            fputs(gai_strerror(code), stderr);
-            break;
+    case E_ADDRINFO:
+        fputs(gai_strerror(code), stderr);
+        break;
 
-        case E_SOCKET:
-            fputs("Failed to open server socket", stderr);
-            switch (code) {
-                case EACCES:
-                    fputs(": access denied", stderr);
-                    break;
-                case ENOBUFS:
-                case ENOMEM:
-                    fputs(": out of memory", stderr);
-                    break;
-            }
+    case E_SOCKET:
+        fputs("Failed to open server socket", stderr);
+        switch (code) {
+        case EACCES:
+            fputs(": access denied", stderr);
             break;
+        case ENOBUFS:
+        case ENOMEM:
+            fputs(": out of memory", stderr);
+            break;
+        }
+        break;
 
-        case E_BIND:
-            fputs("Failed to bind server socket", stderr);
-            switch (code) {
-                case EACCES:
-                    fputs(": access denied", stderr);
-                    break;
-                case EADDRINUSE:
-                    fputs(": address already in use", stderr);
-                    break;
-            }
+    case E_BIND:
+        fputs("Failed to bind server socket", stderr);
+        switch (code) {
+        case EACCES:
+            fputs(": access denied", stderr);
             break;
+        case EADDRINUSE:
+            fputs(": address already in use", stderr);
+            break;
+        }
+        break;
 
-        case E_LISTEN:
-            fputs("Failed to listen on server socket", stderr);
-            if (code == EADDRINUSE)
-                fputs(": address already in use", stderr);
-            break;
+    case E_LISTEN:
+        fputs("Failed to listen on server socket", stderr);
+        if (code == EADDRINUSE)
+            fputs(": address already in use", stderr);
+        break;
 
-        case E_HANDLER:
-            fputs("Failed to set custom signal handlers", stderr);
-            break;
+    case E_HANDLER:
+        fputs("Failed to set custom signal handlers", stderr);
+        break;
     }
     fputc('\n', stderr);
 }
@@ -215,21 +215,21 @@ void handle_connection(int socket) {
     req.mark = 0;
 
     switch (parse_request(&req)) {
-        case REQ_GET:
-            write(socket, RESP_200, sizeof(RESP_200));
-            return;
+    case REQ_GET:
+        write(socket, RESP_200, sizeof(RESP_200));
+        return;
 
-        case REQ_HEAD:
-            write(socket, RESP_200H, sizeof(RESP_200H));
-            return;
+    case REQ_HEAD:
+        write(socket, RESP_200H, sizeof(RESP_200H));
+        return;
 
-        case REQ_BAD_HTTP:
-            write(socket, RESP_400, sizeof(RESP_400));
-            return;
+    case REQ_BAD_HTTP:
+        write(socket, RESP_400, sizeof(RESP_400));
+        return;
 
-        case REQ_BAD_METHOD:
-            write(socket, RESP_501, sizeof(RESP_501));
-            return;
+    case REQ_BAD_METHOD:
+        write(socket, RESP_501, sizeof(RESP_501));
+        return;
     }
 }
 

@@ -23,6 +23,9 @@ struct request {
     int size;
     int mark;
     int fd;
+
+    int header;
+    long content_length;
 };
 
 
@@ -30,8 +33,6 @@ struct request {
 
 #define TRUE  1
 #define FALSE 0
-
-#define min(a, b) ((a) < (b) ? (a) : (b))
 
 
 // functions
