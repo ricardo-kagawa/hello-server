@@ -1,7 +1,8 @@
 import pytest
 
 from pathlib import Path
-from subprocess import check_call, Popen
+from signal import SIGINT
+from subprocess import check_call, Popen, TimeoutExpired
 
 
 @pytest.fixture(scope='session')
@@ -13,7 +14,10 @@ def server(request):
 
     def cleanup():
         try:
-            proc.kill()
+            proc.send_signal(SIGINT)
+            proc.wait(5)
+        except TimeoutExpired:
+            proc.terminate()
             proc.wait()
         finally:
             exe.unlink()

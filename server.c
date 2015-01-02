@@ -1,8 +1,3 @@
-/**
- * Dummy HTTP server. Use optional first argument to set port number
- * (defaults to 8080).
- */
-
 #include <errno.h>
 #include <netdb.h>
 #include <signal.h>
@@ -13,11 +8,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "server.h"
+#include "parser.c"
 
-// the default ulimit -Sn is usually 1024, but
-// take the default file descriptors into account
-#define BACKLOG_SIZE    1000
-#define DEFAULT_SERVICE "8080"
 
 #define E_NONE     0
 #define E_ADDRINFO 1
@@ -27,26 +20,32 @@
 #define E_ACCEPT   5
 #define E_HANDLER  6
 
+#define RESP_200 "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world"
+#define RESP_200H "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n"
+#define RESP_400 "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
+#define RESP_501 "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n"
+
 
 // keep global state somewhere easy to find
-struct global_t {
+struct global_vars {
     // signal handlers do not have access to local variables
     int stop_server;
 } globals;
+
 
 
 /**
  * Outputs a corresponding error message to stderr.
  */
 void error(int cat, int code) {
-    switch(cat) {
+    switch (cat) {
         case E_ADDRINFO:
             fputs(gai_strerror(code), stderr);
             break;
 
         case E_SOCKET:
             fputs("Failed to open server socket", stderr);
-            switch(code) {
+            switch (code) {
                 case EACCES:
                     fputs(": access denied", stderr);
                     break;
@@ -59,7 +58,7 @@ void error(int cat, int code) {
 
         case E_BIND:
             fputs("Failed to bind server socket", stderr);
-            switch(code) {
+            switch (code) {
                 case EACCES:
                     fputs(": access denied", stderr);
                     break;
@@ -116,7 +115,7 @@ struct addrinfo* get_server_addrinfo(char service[]) {
  */
 int open_server_socket(char service[]) {
     struct addrinfo *ai, *aip;
-    int fd;
+    int fd, val;
 
     ai = get_server_addrinfo(service);
 
@@ -129,6 +128,9 @@ int open_server_socket(char service[]) {
             aip = aip->ai_next;
             continue;
         }
+
+        val = TRUE;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
 
         if (bind(fd, aip->ai_addr, aip->ai_addrlen) != 0) {
             error(E_BIND, errno);
@@ -156,7 +158,7 @@ int open_server_socket(char service[]) {
  * Prevents the server from accepting further requests.
  */
 void stop_server() {
-    globals.stop_server = 1;
+    globals.stop_server = TRUE;
     puts("stopping");
 }
 
@@ -184,19 +186,51 @@ void set_handlers() {
     sa.sa_flags = 0;
     sigemptyset(&sa.sa_mask);
 
-    if(sigaction(SIGINT, &sa, NULL) != 0)
+    if (sigaction(SIGINT, &sa, NULL) != 0)
         error(E_HANDLER, errno);
 }
 
+// see header file
+int read_socket(struct request *req) {
+    req->size = read(req->fd, req->data, sizeof(req->data));
+    req->mark = 0;
+    return (req->size > 0);
+}
+
 /**
- * Handles a new client connection. At this point, it is still unknown if
- * the client is actually sending an HTTP request. The current implementation
- * will assume that the client is sending an HTTP request, and respond
- * "Hello, world!" regardless.
+ * Handles a new client connection.
  */
 void handle_connection(int socket) {
-    char response[] = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
-    write(socket, response, sizeof(response));
+    struct request req;
+    struct timeval t;
+
+    t.tv_usec = 0;
+    t.tv_sec = 30;
+
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &t, sizeof(t));
+    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &t, sizeof(t));
+
+    req.fd = socket;
+    req.size = 0;
+    req.mark = 0;
+
+    switch (parse_request(&req)) {
+        case REQ_GET:
+            write(socket, RESP_200, sizeof(RESP_200));
+            return;
+
+        case REQ_HEAD:
+            write(socket, RESP_200H, sizeof(RESP_200H));
+            return;
+
+        case REQ_BAD_HTTP:
+            write(socket, RESP_400, sizeof(RESP_400));
+            return;
+
+        case REQ_BAD_METHOD:
+            write(socket, RESP_501, sizeof(RESP_501));
+            return;
+    }
 }
 
 int main(int argc, char** argv) {
@@ -205,7 +239,7 @@ int main(int argc, char** argv) {
     ssfd = open_server_socket((argc > 1) ? argv[1] : DEFAULT_SERVICE);
     puts("server started");
 
-    globals.stop_server = 0;
+    globals.stop_server = FALSE;
     set_handlers();
 
     while (!globals.stop_server) {
