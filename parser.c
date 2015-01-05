@@ -169,14 +169,15 @@ int parse_request_uri(struct request *req) {
 }
 
 /**
- * Parses the HTTP version. Either 1.0 or 1.1. Returns zero on failure.
+ * Parses the HTTP version. Must be 1.x. Returns zero on failure.
  */
 int parse_http_version(struct request *req) {
     if (!read_constant(req, http_version, sizeof(http_version) - 2))
         return FALSE;
 
     ensure_data(req, FALSE);
-    if (req->data[req->mark] == '1' || req->data[req->mark] == '0') {
+    if (isdigit(req->data[req->mark])) {
+        req->version = req->data[req->mark];
         req->mark++;
         read_constant(req, CRLF, 2);
         return TRUE;
@@ -198,13 +199,13 @@ int parse_header_name(struct request *req) {
     m = sizeof(h_content_length) - 1;
     for (p = 0; p < m; p += n) {
         ensure_data(req, FALSE);
-
         data = req->data + req->mark;
         n = min(req->size - req->mark, m - p);
-        req->mark += n;
 
         if (strncasecmp(data, h_content_length + p, n) != 0)
             break;
+
+        req->mark += n;
     }
 
     // Content-Length
@@ -278,6 +279,8 @@ int parse_header(struct request *req) {
     if (h == H_BAD_HEADER)
         return HEADER_ERROR;
 
+    debug("header: %d", h);
+
     if (!parse_header_value(h, req))
         return HEADER_ERROR;
 
@@ -326,7 +329,7 @@ int parse_request(struct request *req) {
     method = parse_request_method(req);
     if (method == REQ_BAD_HTTP)
         return method;
-    debug("parsed method");
+    debug("parsed method: %d", method);
 
     if (!parse_request_uri(req))
         return REQ_BAD_HTTP;
@@ -334,16 +337,20 @@ int parse_request(struct request *req) {
 
     if (!parse_http_version(req))
         return REQ_BAD_HTTP;
-    debug("parsed version");
+    debug("parsed version: %c", req->version);
 
     if (!parse_headers(req))
         return REQ_BAD_HTTP;
     debug("parsed headers");
-    debug("content length: %ld", req->content_length);
+
+    debug("content-length: %ld", req->content_length);
+
 
     if (!read_body(req))
         return REQ_BAD_HTTP;
-    debug("consumed body");
+
+    if (req->content_length > 0)
+        debug("consumed body");
 
     return method;
 }

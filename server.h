@@ -24,6 +24,7 @@ struct request {
     int mark;
     int fd;
 
+    char version;
     long content_length;
 };
 
