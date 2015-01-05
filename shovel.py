@@ -6,8 +6,11 @@ SRC = Path('server.c')
 EXE = Path('cserver')
 
 @task
-def compile():
-    check_call(('gcc', '-o', str(EXE), str(SRC)))
+def compile(debug=False):
+    cmd = ['gcc', '-o', str(EXE), str(SRC)]
+    if debug:
+        cmd += ['-D', 'DEBUG']
+    check_call(cmd)
 
 @task
 def clean():

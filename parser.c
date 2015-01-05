@@ -12,8 +12,9 @@
 #define HEADER_STOP  1
 #define HEADER_ERROR 2
 
-#define H_GENERIC        0
-#define H_CONTENT_LENGTH 1
+#define H_BAD_HEADER     0
+#define H_GENERIC        1
+#define H_CONTENT_LENGTH 2
 
 #define CRLF "\r\n"
 
@@ -183,8 +184,6 @@ int parse_http_version(struct request *req) {
         return FALSE;
 }
 
-// FIXME return header key instead of just OK/ERROR
-
 /**
  * Parses an HTTP header name. It is treated especially to locate specific
  * headers, like Content-Length. Return zero on failure.
@@ -208,16 +207,12 @@ int parse_header_name(struct request *req) {
             break;
     }
 
-    // check Content-Length
+    // Content-Length
+    if (p == m)
+        return H_CONTENT_LENGTH;
 
-    if (p == m) {
-        req->header = H_CONTENT_LENGTH;
-        return TRUE;
-    }
+    // other headers
 
-    // check generic header name
-
-    req->header = H_GENERIC;
     ensure_data(req, HEADER_ERROR);
     while (is_token_char(req->data[req->mark])) {
         req->mark++;
@@ -228,13 +223,13 @@ int parse_header_name(struct request *req) {
         return HEADER_ERROR;
 
     req->mark++;
-    return TRUE;
+    return H_GENERIC;
 }
 
 /**
  * Parses a header value. Deprecated header line folding is not supported.
  */
-int parse_header_value(struct request *req) {
+int parse_header_value(int header, struct request *req) {
     char buffer[BUFFER_SIZE], c, p;
 
     p = 0;
@@ -242,7 +237,7 @@ int parse_header_value(struct request *req) {
     c = req->data[req->mark];
 
     while (isgraph(c) || c == ' ' || c == '\t') {
-        if (req->header != H_GENERIC)
+        if (header != H_GENERIC)
             buffer[p++] = c;
 
         req->mark++;
@@ -251,7 +246,7 @@ int parse_header_value(struct request *req) {
     }
 
     if (read_constant(req, CRLF, 2)) {
-        switch (req->header) {
+        switch (header) {
         case H_CONTENT_LENGTH:
             buffer[p] = '\0';
 
@@ -274,13 +269,16 @@ int parse_header_value(struct request *req) {
  * Content-Length for proper request consumption.
  */
 int parse_header(struct request *req) {
+    int h;
+
     if (read_constant(req, CRLF, 2))
         return HEADER_STOP;
 
-    if (!parse_header_name(req))
+    h = parse_header_name(req);
+    if (h == H_BAD_HEADER)
         return HEADER_ERROR;
 
-    if (!parse_header_value(req))
+    if (!parse_header_value(h, req))
         return HEADER_ERROR;
 
     return HEADER_OK;
@@ -328,18 +326,24 @@ int parse_request(struct request *req) {
     method = parse_request_method(req);
     if (method == REQ_BAD_HTTP)
         return method;
+    debug("parsed method");
 
     if (!parse_request_uri(req))
         return REQ_BAD_HTTP;
+    debug("parsed URI");
 
     if (!parse_http_version(req))
         return REQ_BAD_HTTP;
+    debug("parsed version");
 
     if (!parse_headers(req))
         return REQ_BAD_HTTP;
+    debug("parsed headers");
+    debug("content length: %ld", req->content_length);
 
     if (!read_body(req))
         return REQ_BAD_HTTP;
+    debug("consumed body");
 
     return method;
 }

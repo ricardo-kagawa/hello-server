@@ -117,6 +117,7 @@ int open_server_socket(char service[]) {
     struct addrinfo *ai, *aip;
     int fd, val;
 
+    debug("service: %s", service);
     ai = get_server_addrinfo(service);
 
     aip = ai;
@@ -168,6 +169,7 @@ void stop_server() {
  * cannot be caught or ignored.
  */
 void handle_signal(int s) {
+    debug("signal: %d", s);
     if (s == SIGINT)
         stop_server();
 }
@@ -192,8 +194,11 @@ void set_handlers() {
 
 // see header file
 int read_socket(struct request *req) {
+    debug("reading socket");
     req->size = read(req->fd, req->data, sizeof(req->data));
     req->mark = 0;
+
+    debug("%d bytes read", req->size);
     return (req->size > 0);
 }
 
@@ -203,6 +208,8 @@ int read_socket(struct request *req) {
 void handle_connection(int socket) {
     struct request req;
     struct timeval t;
+
+    debug("client connected");
 
     t.tv_usec = 0;
     t.tv_sec = 30;
@@ -235,6 +242,8 @@ void handle_connection(int socket) {
 
 int main(int argc, char** argv) {
     int ssfd, sofd;
+
+    debug("enabled verbose output");
 
     ssfd = open_server_socket((argc > 1) ? argv[1] : DEFAULT_SERVICE);
     puts("server started");

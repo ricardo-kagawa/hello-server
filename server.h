@@ -24,7 +24,6 @@ struct request {
     int mark;
     int fd;
 
-    int header;
     long content_length;
 };
 
@@ -33,6 +32,17 @@ struct request {
 
 #define TRUE  1
 #define FALSE 0
+
+#ifdef DEBUG
+#define debug(...) do { \
+    printf(__VA_ARGS__); \
+    putchar('\n'); \
+} while (0)
+
+#else
+#define debug(...) do {} while (0)
+
+#endif
 
 
 // functions
