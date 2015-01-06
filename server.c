@@ -20,10 +20,11 @@
 #define E_ACCEPT   5
 #define E_HANDLER  6
 
-#define RESP_200 "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world"
-#define RESP_200H "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n"
-#define RESP_400 "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
-#define RESP_501 "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n"
+#define HTTP_VERSION "HTTP/1."
+#define RESP_200 " 200 OK\r\nContent-Length: 11\r\n\r\nhello world"
+#define RESP_200H " 200 OK\r\nContent-Length: 11\r\n\r\n"
+#define RESP_400 " 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
+#define RESP_501 " 501 Not Implemented\r\nContent-Length: 0\r\n\r\n"
 
 
 // keep global state somewhere easy to find
@@ -203,6 +204,16 @@ int read_socket(struct request *req) {
 }
 
 /**
+ * Writes the given response with size bytes to the socket pointed to by req.
+ * The corresponding HTTP minor version in req is written to the response.
+ */
+void write_response(struct request *req, char resp[], int size) {
+    write(req->fd, HTTP_VERSION, sizeof(HTTP_VERSION) - 1);
+    write(req->fd, &(req->version), sizeof(char));
+    write(req->fd, resp, size - 1);
+}
+
+/**
  * Handles a new client connection.
  */
 void handle_connection(int socket) {
@@ -223,19 +234,19 @@ void handle_connection(int socket) {
 
     switch (parse_request(&req)) {
     case REQ_GET:
-        write(socket, RESP_200, sizeof(RESP_200));
+        write_response(&req, RESP_200, sizeof(RESP_200));
         return;
 
     case REQ_HEAD:
-        write(socket, RESP_200H, sizeof(RESP_200H));
+        write_response(&req, RESP_200H, sizeof(RESP_200H));
         return;
 
     case REQ_BAD_HTTP:
-        write(socket, RESP_400, sizeof(RESP_400));
+        write_response(&req, RESP_400, sizeof(RESP_400));
         return;
 
     case REQ_BAD_METHOD:
-        write(socket, RESP_501, sizeof(RESP_501));
+        write_response(&req, RESP_501, sizeof(RESP_501));
         return;
     }
 }
