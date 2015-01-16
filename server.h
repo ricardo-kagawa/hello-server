@@ -6,6 +6,20 @@
 #ifndef SERVER
 #define SERVER
 
+#include <ctype.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <netdb.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <ev.h>
+
 
 // configuration constants
 

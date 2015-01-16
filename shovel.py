@@ -7,7 +7,7 @@ EXE = Path('cserver')
 
 @task
 def compile(debug=False):
-    cmd = ['gcc', '-o', str(EXE), str(SRC)]
+    cmd = ['gcc', '-o', str(EXE), str(SRC), '-lev']
     if debug:
         cmd += ['-D', 'DEBUG']
     check_call(cmd)

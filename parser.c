@@ -1,6 +1,3 @@
-#include <ctype.h>
-#include <stdlib.h>
-
 #include "server.h"
 
 #define REQ_BAD_HTTP   0

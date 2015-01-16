@@ -1,13 +1,3 @@
-#include <errno.h>
-#include <netdb.h>
-#include <signal.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include "server.h"
 #include "parser.c"
 
@@ -27,11 +17,12 @@
 #define RESP_501 " 501 Not Implemented\r\nContent-Length: 0\r\n\r\n"
 
 
-// keep global state somewhere easy to find
-struct global_vars {
-    // signal handlers do not have access to local variables
-    int stop_server;
-} globals;
+/**
+ * Server state.
+ */
+struct server_t {
+    int socket;
+};
 
 
 
@@ -157,40 +148,11 @@ int open_server_socket(char service[]) {
 }
 
 /**
- * Prevents the server from accepting further requests.
+ * Handles SIGINT by stopping the default event loop.
  */
-void stop_server() {
-    globals.stop_server = TRUE;
+static void sigint_cb(struct ev_loop *loop, ev_signal *w, int events) {
     puts("stopping");
-}
-
-/**
- * OS signal handler. Signal handlers execute as if the function was called
- * immediately in one the available threads. Note that SIGKILL and SIGTERM
- * cannot be caught or ignored.
- */
-void handle_signal(int s) {
-    debug("signal: %d", s);
-    if (s == SIGINT)
-        stop_server();
-}
-
-/**
- * Configures singal handlers (see signal(7)). The following singals are
- * handled especially:
- *
- * SIGINT (2): stop the server cleanly
- */
-void set_handlers() {
-    struct sigaction sa;
-
-    sa.sa_handler = &handle_signal;
-    sa.sa_restorer = NULL;
-    sa.sa_flags = 0;
-    sigemptyset(&sa.sa_mask);
-
-    if (sigaction(SIGINT, &sa, NULL) != 0)
-        error(E_HANDLER, errno);
+    ev_break(loop, EVBREAK_ALL);
 }
 
 // see header file
@@ -251,27 +213,47 @@ void handle_connection(int socket) {
     }
 }
 
+/**
+ * Handles I/O events from server socket.
+ */
+static void accept_cb(struct ev_loop *loop, ev_io *w, int events) {
+    struct server_t *server;
+    int fd;
+
+    server = (struct server_t*) w->data;
+
+    fd = accept(server->socket, NULL, NULL);
+    if (fd < 0)
+        return;
+
+    handle_connection(fd);
+    close(fd);
+}
+
 int main(int argc, char** argv) {
-    int ssfd, sofd;
+    struct ev_loop *loop;
+    struct ev_signal signal_watcher;
+    struct ev_io socket_watcher;
+    struct server_t server;
 
     debug("enabled verbose output");
 
-    ssfd = open_server_socket((argc > 1) ? argv[1] : DEFAULT_SERVICE);
+    server.socket = open_server_socket(
+            (argc > 1) ? argv[1] : DEFAULT_SERVICE);
+
+    ev_signal_init(&signal_watcher, sigint_cb, SIGINT);
+    ev_io_init(&socket_watcher, accept_cb, server.socket, EV_READ);
+
+    socket_watcher.data = &server;
+    loop = EV_DEFAULT;
+
+    ev_signal_start(loop, &signal_watcher);
+    ev_io_start(loop, &socket_watcher);
+
     puts("server started");
+    ev_run(loop, 0);
 
-    globals.stop_server = FALSE;
-    set_handlers();
-
-    while (!globals.stop_server) {
-        sofd = accept(ssfd, NULL, NULL);
-        if (sofd < 0)
-            break;
-
-        handle_connection(sofd);
-        close(sofd);
-    }
-
-    close(ssfd);
+    close(server.socket);
     puts("server stopped");
     return 0;
 }

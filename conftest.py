@@ -9,7 +9,7 @@ from subprocess import check_call, Popen, TimeoutExpired
 def server(request):
     src = Path('server.c')
     exe = Path('/tmp/cserver')
-    check_call(('gcc', '-o', str(exe), str(src)))
+    check_call(('gcc', '-o', str(exe), str(src), '-lev'))
     proc = Popen([str(exe)])
 
     def cleanup():
