@@ -1,5 +1,9 @@
 #include "server.h"
 
+#define ST_START 0
+#define ST_ERROR 1
+#define ST_END   2
+
 #define REQ_BAD_HTTP   0
 #define REQ_GET        1
 #define REQ_HEAD       2
@@ -67,8 +71,8 @@ const unsigned char token_chars[] = {
 
 // If the buffered data is consumed, attempt to read more data
 // from the socket. If that fails, return the error code.
-#define ensure_data(req, ret) do { \
-    if (req->size - req->mark == 0 && !read_socket(req)) \
+#define ensure_data(h, ret) do { \
+    if (h->size - h->mark == 0 && !read_socket(h)) \
         return ret; \
 } while (0)
 
@@ -80,17 +84,17 @@ const unsigned char token_chars[] = {
  * there was not enough data to read, or if the available data did not match
  * the expected token).
  */
-int read_constant(struct request *req, const char token[], int n) {
+int read_constant(struct handler *h, const char token[], int n) {
     int m, p;
 
     for (p = 0; p < n; p += m) {
-        ensure_data(req, FALSE);
+        ensure_data(h, FALSE);
 
-        m = min(req->size - req->mark, n - p);
-        if (memcmp(req->data + req->mark, token + p, m) != 0)
+        m = min(h->size - h->mark, n - p);
+        if (memcmp(h->data + h->mark, token + p, m) != 0)
             return FALSE;
 
-        req->mark += m;
+        h->mark += m;
     }
 
     return TRUE;
@@ -119,28 +123,28 @@ int is_uri_char(char c) {
  * Parses the request method. Returns REQ_GET or REQ_HEAD on success,
  * or REQ_BAD_HTTP or REQ_BAD_METHOD on error.
  */
-int parse_request_method(struct request *req) {
-    ensure_data(req, REQ_BAD_HTTP);
+int parse_request_method(struct handler *h) {
+    ensure_data(h, REQ_BAD_HTTP);
 
-    if (req->data[0] == m_get[0]) {
-        req->mark = 1;
-        return read_constant(req, m_get + 1, sizeof(m_get) - 2) ?
+    if (h->data[0] == m_get[0]) {
+        h->mark = 1;
+        return read_constant(h, m_get + 1, sizeof(m_get) - 2) ?
                 REQ_GET : REQ_BAD_METHOD;
-    } else if (req->data[0] == m_head[0]) {
-        req->mark = 1;
-        return read_constant(req, m_head + 1, sizeof(m_head) - 2) ?
+    } else if (h->data[0] == m_head[0]) {
+        h->mark = 1;
+        return read_constant(h, m_head + 1, sizeof(m_head) - 2) ?
                 REQ_HEAD : REQ_BAD_METHOD;
     } else {
-        req->mark = 1;
+        h->mark = 1;
 
-        ensure_data(req, REQ_BAD_HTTP);
-        while (is_token_char(req->data[req->mark])) {
-            req->mark++;
-            ensure_data(req, REQ_BAD_HTTP);
+        ensure_data(h, REQ_BAD_HTTP);
+        while (is_token_char(h->data[h->mark])) {
+            h->mark++;
+            ensure_data(h, REQ_BAD_HTTP);
         }
 
-        if (req->data[req->mark] == ' ') {
-            req->mark++;
+        if (h->data[h->mark] == ' ') {
+            h->mark++;
             return REQ_BAD_METHOD;
         } else
             return REQ_BAD_HTTP;
@@ -151,32 +155,32 @@ int parse_request_method(struct request *req) {
  * Parses the request URI. Returns zero on failure (if the request does not
  * contain a string with valid URI characters as the URI value).
  */
-int parse_request_uri(struct request *req) {
-    ensure_data(req, FALSE);
-    while (is_uri_char(req->data[req->mark])) {
-        req->mark++;
-        ensure_data(req, FALSE);
+int parse_request_uri(struct handler *h) {
+    ensure_data(h, FALSE);
+    while (is_uri_char(h->data[h->mark])) {
+        h->mark++;
+        ensure_data(h, FALSE);
     }
 
-    if (req->data[req->mark] != ' ')
+    if (h->data[h->mark] != ' ')
         return FALSE;
 
-    req->mark++;
+    h->mark++;
     return TRUE;
 }
 
 /**
  * Parses the HTTP version. Must be 1.x. Returns zero on failure.
  */
-int parse_http_version(struct request *req) {
-    if (!read_constant(req, http_version, sizeof(http_version) - 2))
+int parse_http_version(struct handler *h) {
+    if (!read_constant(h, http_version, sizeof(http_version) - 2))
         return FALSE;
 
-    ensure_data(req, FALSE);
-    if (isdigit(req->data[req->mark])) {
-        req->version = req->data[req->mark];
-        req->mark++;
-        read_constant(req, CRLF, 2);
+    ensure_data(h, FALSE);
+    if (isdigit(h->data[h->mark])) {
+        h->request.version = h->data[h->mark];
+        h->mark++;
+        read_constant(h, CRLF, 2);
         return TRUE;
     } else
         return FALSE;
@@ -186,7 +190,7 @@ int parse_http_version(struct request *req) {
  * Parses an HTTP header name. It is treated especially to locate specific
  * headers, like Content-Length. Return zero on failure.
  */
-int parse_header_name(struct request *req) {
+int parse_header_name(struct handler *h) {
     int m, n, p;
     char *data;
 
@@ -195,14 +199,14 @@ int parse_header_name(struct request *req) {
 
     m = sizeof(h_content_length) - 1;
     for (p = 0; p < m; p += n) {
-        ensure_data(req, FALSE);
-        data = req->data + req->mark;
-        n = min(req->size - req->mark, m - p);
+        ensure_data(h, FALSE);
+        data = h->data + h->mark;
+        n = min(h->size - h->mark, m - p);
 
         if (strncasecmp(data, h_content_length + p, n) != 0)
             break;
 
-        req->mark += n;
+        h->mark += n;
     }
 
     // Content-Length
@@ -211,47 +215,47 @@ int parse_header_name(struct request *req) {
 
     // other headers
 
-    ensure_data(req, HEADER_ERROR);
-    while (is_token_char(req->data[req->mark])) {
-        req->mark++;
-        ensure_data(req, HEADER_ERROR);
+    ensure_data(h, HEADER_ERROR);
+    while (is_token_char(h->data[h->mark])) {
+        h->mark++;
+        ensure_data(h, HEADER_ERROR);
     }
 
-    if (req->data[req->mark] != ':')
+    if (h->data[h->mark] != ':')
         return HEADER_ERROR;
 
-    req->mark++;
+    h->mark++;
     return H_GENERIC;
 }
 
 /**
  * Parses a header value. Deprecated header line folding is not supported.
  */
-int parse_header_value(int header, struct request *req) {
+int parse_header_value(int header, struct handler *h) {
     char buffer[BUFFER_SIZE], c, p;
 
     p = 0;
-    ensure_data(req, FALSE);
-    c = req->data[req->mark];
+    ensure_data(h, FALSE);
+    c = h->data[h->mark];
 
     while (isgraph(c) || c == ' ' || c == '\t') {
         if (header != H_GENERIC)
             buffer[p++] = c;
 
-        req->mark++;
-        ensure_data(req, FALSE);
-        c = req->data[req->mark];
+        h->mark++;
+        ensure_data(h, FALSE);
+        c = h->data[h->mark];
     }
 
-    if (read_constant(req, CRLF, 2)) {
+    if (read_constant(h, CRLF, 2)) {
         switch (header) {
         case H_CONTENT_LENGTH:
             buffer[p] = '\0';
 
             errno = 0;
-            req->content_length = strtol(buffer, NULL, 10);
+            h->request.content_length = strtol(buffer, NULL, 10);
             if (errno != 0)
-                req->content_length = 0;
+                h->request.content_length = 0;
 
             return TRUE;
 
@@ -266,19 +270,19 @@ int parse_header_value(int header, struct request *req) {
  * Parses a single HTTP header. Most headers will be ignored, except
  * Content-Length for proper request consumption.
  */
-int parse_header(struct request *req) {
-    int h;
+int parse_header(struct handler *h) {
+    int header;
 
-    if (read_constant(req, CRLF, 2))
+    if (read_constant(h, CRLF, 2))
         return HEADER_STOP;
 
-    h = parse_header_name(req);
-    if (h == H_BAD_HEADER)
+    header = parse_header_name(h);
+    if (header == H_BAD_HEADER)
         return HEADER_ERROR;
 
-    debug("header: %d", h);
+    debug("header: %d", header);
 
-    if (!parse_header_value(h, req))
+    if (!parse_header_value(header, h))
         return HEADER_ERROR;
 
     return HEADER_OK;
@@ -289,14 +293,14 @@ int parse_header(struct request *req) {
  * values are discarded. Returns zero on failure (bad header syntax or socket
  * error).
  */
-int parse_headers(struct request *req) {
+int parse_headers(struct handler *h) {
     int r;
 
-    req->content_length = 0;
+    h->request.content_length = 0;
 
-    r = parse_header(req);
+    r = parse_header(h);
     while (r == HEADER_OK)
-        r = parse_header(req);
+        r = parse_header(h);
 
     return (r == HEADER_STOP) ? TRUE : FALSE;
 }
@@ -304,13 +308,13 @@ int parse_headers(struct request *req) {
 /**
  * Reads request body.
  */
-int read_body(struct request *req) {
+int read_body(struct handler *h) {
     int m, n;
 
-    for (n = 0; n < req->content_length; n += m) {
-        ensure_data(req, FALSE);
-        m = min(req->size - req->mark, req->content_length - n);
-        req->mark += m;
+    for (n = 0; n < h->request.content_length; n += m) {
+        ensure_data(h, FALSE);
+        m = min(h->size - h->mark, h->request.content_length - n);
+        h->mark += m;
     }
     return TRUE;
 }
@@ -320,36 +324,48 @@ int read_body(struct request *req) {
  * the request data, identifying GET and HEAD HTTP methods. Most of the
  * data read is actually discarded, in the current implementation.
  */
-int parse_request(struct request *req) {
+void parse_request(struct handler *h) {
     int method;
 
-    method = parse_request_method(req);
-    if (method == REQ_BAD_HTTP)
-        return method;
+    if (!read_socket(h)) {
+        h->state = ST_ERROR;
+        return;
+    }
+
+    switch (h->state) {
+    default:
+        debug("state: %d", h->state);
+        h->state = ST_END;
+    }
+    return;
+
+    method = parse_request_method(h);
+//    if (method == REQ_BAD_HTTP)
+//        return method;
     debug("parsed method: %d", method);
 
-    if (!parse_request_uri(req))
-        return REQ_BAD_HTTP;
+//    if (!parse_request_uri(h))
+//        return REQ_BAD_HTTP;
     debug("parsed URI");
 
-    if (!parse_http_version(req))
-        return REQ_BAD_HTTP;
-    debug("parsed version: %c", req->version);
+//    if (!parse_http_version(h))
+//        return REQ_BAD_HTTP;
+    debug("parsed version: %c", h->request.version);
 
-    if (!parse_headers(req))
-        return REQ_BAD_HTTP;
+//    if (!parse_headers(h))
+//        return REQ_BAD_HTTP;
     debug("parsed headers");
 
-    debug("content-length: %ld", req->content_length);
+    debug("content-length: %ld", h->request.content_length);
 
 
-    if (!read_body(req))
-        return REQ_BAD_HTTP;
+//    if (!read_body(h))
+//        return REQ_BAD_HTTP;
 
-    if (req->content_length > 0)
-        debug("consumed body");
+//    if (h->request.content_length > 0)
+//        debug("consumed body");
 
-    return method;
+//    return method;
 }
 
 #undef ensure_data
