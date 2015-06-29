@@ -1,18 +1,23 @@
 from pathlib import Path
-from subprocess import check_call
+from subprocess import check_call, CalledProcessError
 from shovel import task
 
-SRC = Path('server.c')
-EXE = Path('cserver')
+SRC = 'errors.c', 'util.c', 'parser.c', 'server.c'
+EXE = 'cserver'
 
 @task
 def compile(debug=False):
-    cmd = ['gcc', '-o', str(EXE), str(SRC), '-lev']
-    if debug:
-        cmd += ['-D', 'DEBUG']
-    check_call(cmd)
+    try:
+        cmd = ['gcc', '-o', str(Path(EXE))]
+        if debug:
+            cmd += ['-D', 'DEBUG']
+        cmd += [str(Path(src)) for src in SRC]
+        cmd += ['-lev']
+        check_call(cmd)
+    except CalledProcessError as e:
+        print(e)
 
 @task
 def clean():
-    EXE.unlink()
+    Path(EXE).unlink()
 

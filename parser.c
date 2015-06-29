@@ -1,13 +1,6 @@
-#include "server.h"
+#include "parser.h"
 
-#define ST_START 0
-#define ST_ERROR 1
-#define ST_END   2
-
-#define REQ_BAD_HTTP   0
-#define REQ_GET        1
-#define REQ_HEAD       2
-#define REQ_BAD_METHOD 3
+// constants
 
 #define HEADER_OK    0
 #define HEADER_STOP  1
@@ -18,9 +11,6 @@
 #define H_CONTENT_LENGTH 2
 
 #define CRLF "\r\n"
-
-
-// constants
 
 const char m_get[] = "GET ";
 const char m_head[] = "HEAD ";
@@ -67,37 +57,45 @@ const unsigned char token_chars[] = {
 
 // macros
 
-#define min(a, b) ((a) < (b) ? (a) : (b))
-
-// If the buffered data is consumed, attempt to read more data
-// from the socket. If that fails, return the error code.
-#define ensure_data(h, ret) do { \
-    if (h->size - h->mark == 0 && !read_socket(h)) \
-        return ret; \
-} while (0)
+#define ready(p) ((p)->buffer.size - (p)->mark)
 
 
 // functions
 
+#include <string.h>
+
 /**
- * Reads a known token value from the request. Returns zero on failure (if
- * there was not enough data to read, or if the available data did not match
- * the expected token).
+ * Reads data from the socket to the internal buffer.
  */
-int read_constant(struct handler *h, const char token[], int n) {
-    int m, p;
+int read_socket(struct parser *p) {
+    struct chunk *c;
+    char buffer[BUFFER_SIZE];
+    int n, t;
 
-    for (p = 0; p < n; p += m) {
-        ensure_data(h, FALSE);
+    debug("reading socket");
 
-        m = min(h->size - h->mark, n - p);
-        if (memcmp(h->data + h->mark, token + p, m) != 0)
-            return FALSE;
-
-        h->mark += m;
+    t = 0;
+    n = read(p->fd, buffer, BUFFER_SIZE);
+    while (n > 0) {
+        t += n;
+        buffer_append(&(p->buffer), buffer, n);
+        n = read(p->fd, buffer, BUFFER_SIZE);
     }
 
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        p->state = PARSING_ERROR;
+        p->error = E_READ;
+        return FALSE;
+    }
+
+    debug("%d bytes read", t);
     return TRUE;
+}
+
+void advance_mark(struct parser *p, int n) {
+    p->mark += n;
+    if (p->mark > BUFFER_SIZE)
+        p->mark -= buffer_shift(&(p->buffer));
 }
 
 /**
@@ -120,203 +118,281 @@ int is_uri_char(char c) {
 
 
 /**
- * Parses the request method. Returns REQ_GET or REQ_HEAD on success,
- * or REQ_BAD_HTTP or REQ_BAD_METHOD on error.
+ * Parses a known token value from the reader. Returns TRUE when done,
+ * FALSE otherwise. The parser state is set to PARSING_ERROR on failure,
+ * and is not changed otherwise.
  */
-int parse_request_method(struct handler *h) {
-    ensure_data(h, REQ_BAD_HTTP);
+int parse_constant(struct parser *p, const char token[], int n) {
+    if (ready(p) < n)
+        return PARSING_WAIT;
 
-    if (h->data[0] == m_get[0]) {
-        h->mark = 1;
-        return read_constant(h, m_get + 1, sizeof(m_get) - 2) ?
-                REQ_GET : REQ_BAD_METHOD;
-    } else if (h->data[0] == m_head[0]) {
-        h->mark = 1;
-        return read_constant(h, m_head + 1, sizeof(m_head) - 2) ?
-                REQ_HEAD : REQ_BAD_METHOD;
-    } else {
-        h->mark = 1;
+    if (!buffer_starts_with(&(p->buffer), p->mark, token, n))
+        return PARSING_ERROR;
 
-        ensure_data(h, REQ_BAD_HTTP);
-        while (is_token_char(h->data[h->mark])) {
-            h->mark++;
-            ensure_data(h, REQ_BAD_HTTP);
+    advance_mark(p, n);
+    return PARSING_DONE;
+}
+
+/**
+ * Parses the request method.
+ */
+int parse_request_method(struct parser *p) {
+    char first;
+    int r;
+
+    if (ready(p) == 0)
+        return PARSING_WAIT;
+
+    first = buffer_get(&(p->buffer), p->mark);
+    if (first == m_get[0]) {
+        r = parse_constant(p, m_get, sizeof(m_get) - 1);
+        if (r != PARSING_DONE)
+            return r;
+
+        p->request.method = METHOD_GET;
+    } else if (first == m_head[0]) {
+        r = parse_constant(p, m_head, sizeof(m_head) - 1);
+        if (r != PARSING_DONE)
+            return r;
+
+        p->request.method = METHOD_HEAD;
+    } else if (is_token_char(first)) {
+        // other methods
+
+        if (ready(p) < 2)
+            return PARSING_WAIT;
+        advance_mark(p, 1);
+
+        while (is_token_char(buffer_get(&(p->buffer), p->mark))) {
+            if (ready(p) < 2)
+                return PARSING_WAIT;
+            advance_mark(p, 1);
         }
 
-        if (h->data[h->mark] == ' ') {
-            h->mark++;
-            return REQ_BAD_METHOD;
-        } else
-            return REQ_BAD_HTTP;
-    }
-}
+        if (buffer_get(&(p->buffer), p->mark) != ' ')
+            return PARSING_ERROR;
+        advance_mark(p, 1);
 
-/**
- * Parses the request URI. Returns zero on failure (if the request does not
- * contain a string with valid URI characters as the URI value).
- */
-int parse_request_uri(struct handler *h) {
-    ensure_data(h, FALSE);
-    while (is_uri_char(h->data[h->mark])) {
-        h->mark++;
-        ensure_data(h, FALSE);
-    }
-
-    if (h->data[h->mark] != ' ')
-        return FALSE;
-
-    h->mark++;
-    return TRUE;
-}
-
-/**
- * Parses the HTTP version. Must be 1.x. Returns zero on failure.
- */
-int parse_http_version(struct handler *h) {
-    if (!read_constant(h, http_version, sizeof(http_version) - 2))
-        return FALSE;
-
-    ensure_data(h, FALSE);
-    if (isdigit(h->data[h->mark])) {
-        h->request.version = h->data[h->mark];
-        h->mark++;
-        read_constant(h, CRLF, 2);
-        return TRUE;
+        p->request.method = METHOD_OTHER;
     } else
-        return FALSE;
+        return PARSING_ERROR;
+
+    return PARSING_DONE;
 }
 
 /**
- * Parses an HTTP header name. It is treated especially to locate specific
- * headers, like Content-Length. Return zero on failure.
+ * Parses the request URI.
  */
-int parse_header_name(struct handler *h) {
-    int m, n, p;
-    char *data;
+int parse_request_uri(struct parser *p) {
+    if (ready(p) < 2)
+        return PARSING_WAIT;
+
+    if (!is_uri_char(buffer_get(&(p->buffer), p->mark)))
+        return PARSING_ERROR;
+    advance_mark(p, 1);
+
+    while (is_uri_char(buffer_get(&(p->buffer), p->mark))) {
+        if (ready(p) < 2)
+            return PARSING_WAIT;
+        advance_mark(p, 1);
+    }
+
+    if (buffer_get(&(p->buffer), p->mark) != ' ')
+        return PARSING_ERROR;
+    advance_mark(p, 1);
+
+    return PARSING_DONE;
+}
+
+/**
+ * Parses the HTTP version. Must be "HTTP/1.x".
+ */
+int parse_http_version(struct parser *p) {
+    char c;
+    int r;
+
+    if (ready(p) < sizeof(http_version) + 1)
+        return PARSING_WAIT;
+
+    r = parse_constant(p, http_version, sizeof(http_version) - 2);
+    if (r != PARSING_DONE)
+        return r;
+
+    c = buffer_get(&(p->buffer), p->mark);
+    if (!isdigit(c))
+        return PARSING_ERROR;
+    p->request.version = c;
+    advance_mark(p, 1);
+
+    return parse_constant(p, CRLF, 2);
+}
+
+/**
+ * Parses an HTTP header name. Some headers are treated especially, as
+ * Content-Length, while others are ignored.
+ */
+int parse_header_name(struct parser *p) {
+    int n, r;
+
+    n = sizeof(h_content_length) - 1;
+    if (ready(p) < n)
+        return PARSING_WAIT;
 
     // Note: If you need to check for other header names,
     // implement an actual FSM instead of comparing to value
 
-    m = sizeof(h_content_length) - 1;
-    for (p = 0; p < m; p += n) {
-        ensure_data(h, FALSE);
-        data = h->data + h->mark;
-        n = min(h->size - h->mark, m - p);
-
-        if (strncasecmp(data, h_content_length + p, n) != 0)
-            break;
-
-        h->mark += n;
+    if (p->state != PARSING_HEADER_NAME_ANY
+            && p->request.method == METHOD_OTHER && buffer_istarts_with(
+            &(p->buffer), p->mark, h_content_length, n)) {
+        // Content-Length
+        p->state = PARSING_HEADER_CONTENT_LENGTH;
+        advance_mark(p, n);
+        return PARSING_DONE;
     }
-
-    // Content-Length
-    if (p == m)
-        return H_CONTENT_LENGTH;
 
     // other headers
 
-    ensure_data(h, HEADER_ERROR);
-    while (is_token_char(h->data[h->mark])) {
-        h->mark++;
-        ensure_data(h, HEADER_ERROR);
+    p->state = PARSING_HEADER_NAME_ANY;
+    if (ready(p) < 2)
+        return PARSING_WAIT;
+
+    if (!is_token_char(buffer_get(&(p->buffer), p->mark)))
+        return PARSING_ERROR;
+    advance_mark(p, 1);
+
+    while (is_token_char(buffer_get(&(p->buffer), p->mark))) {
+        if (ready(p) < 2)
+            return PARSING_WAIT;
+        advance_mark(p, 1);
     }
 
-    if (h->data[h->mark] != ':')
-        return HEADER_ERROR;
+    if (buffer_get(&(p->buffer), p->mark) != ':')
+        return PARSING_ERROR;
+    advance_mark(p, 1);
 
-    h->mark++;
-    return H_GENERIC;
+    p->state = PARSING_HEADER_VALUE;
+    return PARSING_DONE;
 }
 
 /**
  * Parses a header value. Deprecated header line folding is not supported.
  */
-int parse_header_value(int header, struct handler *h) {
-    char buffer[BUFFER_SIZE], c, p;
+int parse_header_value(struct parser *p) {
+    char c;
 
-    p = 0;
-    ensure_data(h, FALSE);
-    c = h->data[h->mark];
+    if (ready(p) < 3)
+        return PARSING_WAIT;
+    c = buffer_get(&(p->buffer), p->mark);
 
     while (isgraph(c) || c == ' ' || c == '\t') {
-        if (header != H_GENERIC)
-            buffer[p++] = c;
-
-        h->mark++;
-        ensure_data(h, FALSE);
-        c = h->data[h->mark];
+        advance_mark(p, 1);
+        if (ready(p) < 3)
+            return PARSING_WAIT;
+        c = buffer_get(&(p->buffer), p->mark);
     }
 
-    if (read_constant(h, CRLF, 2)) {
-        switch (header) {
-        case H_CONTENT_LENGTH:
-            buffer[p] = '\0';
-
-            errno = 0;
-            h->request.content_length = strtol(buffer, NULL, 10);
-            if (errno != 0)
-                h->request.content_length = 0;
-
-            return TRUE;
-
-        default:
-            return TRUE;
-        }
-    } else
-        return FALSE;
+    return parse_constant(p, CRLF, 2);
 }
 
 /**
- * Parses a single HTTP header. Most headers will be ignored, except
- * Content-Length for proper request consumption.
+ * Parses a Content-Length header value.
  */
-int parse_header(struct handler *h) {
-    int header;
+int parse_header_content_length(struct parser *p) {
+    char c, *buffer;
+    int i, m, r;
 
-    if (read_constant(h, CRLF, 2))
-        return HEADER_STOP;
+    if (ready(p) < 3)
+        return PARSING_WAIT;
+    c = buffer_get(&(p->buffer), p->mark);
 
-    header = parse_header_name(h);
-    if (header == H_BAD_HEADER)
-        return HEADER_ERROR;
+    for (m = 1; isdigit(c) || c == ' ' || c == '\t'; m++) {
+        if (ready(p) < 3 + m)
+            return PARSING_WAIT;
+        c = buffer_get(&(p->buffer), p->mark + m);
+    }
 
-    debug("header: %d", header);
+    buffer = buffer_copy(&(p->buffer), p->mark, m - 1);
+    if (buffer == NULL) {
+        p->error = E_MEMORY;
+        return PARSING_ERROR;
+    }
+    advance_mark(p, m - 1);
 
-    if (!parse_header_value(header, h))
-        return HEADER_ERROR;
+    r = parse_constant(p, CRLF, 2);
+    if (r != PARSING_DONE) {
+        free(buffer);
+        return r;
+    }
 
-    return HEADER_OK;
+    errno = 0;
+    p->request.content_length = strtol(buffer, NULL, 10);
+    free(buffer);
+    return (errno == 0) ? PARSING_DONE : PARSING_ERROR;
 }
 
 /**
  * Parses HTTP headers. Only a few headers are actually processed, while most
- * values are discarded. Returns zero on failure (bad header syntax or socket
- * error).
+ * values are discarded.
  */
-int parse_headers(struct handler *h) {
+int parse_headers(struct parser *p) {
     int r;
 
-    h->request.content_length = 0;
+    while (TRUE) {
+        switch (p->state) {
+        case PARSING_HEADERS:
+            r = parse_constant(p, CRLF, 2);
+            if (r != PARSING_ERROR)
+                return r;
+            p->state = PARSING_HEADER_NAME;
+            debug("parsing header");
 
-    r = parse_header(h);
-    while (r == HEADER_OK)
-        r = parse_header(h);
+        case PARSING_HEADER_NAME:
+        case PARSING_HEADER_NAME_ANY:
+            r = parse_header_name(p);
+            if (r != PARSING_DONE)
+                return r;
+            debug("parsed header name");
+        }
 
-    return (r == HEADER_STOP) ? TRUE : FALSE;
+        debug("parser state=%d", p->state);
+        switch (p->state) {
+        case PARSING_HEADER_VALUE:
+            r = parse_header_value(p);
+            break;
+
+        case PARSING_HEADER_CONTENT_LENGTH:
+            r = parse_header_content_length(p);
+            break;
+
+        default:
+            return PARSING_ERROR;
+        }
+
+        if (r != PARSING_DONE)
+            return r;
+        p->state = PARSING_HEADERS;
+        debug("parsed header value");
+    }
+    return PARSING_DONE;
 }
 
 /**
- * Reads request body.
+ * Reads the request body.
  */
-int read_body(struct handler *h) {
-    int m, n;
+int parse_body(struct parser *p) {
+    int n;
 
-    for (n = 0; n < h->request.content_length; n += m) {
-        ensure_data(h, FALSE);
-        m = min(h->size - h->mark, h->request.content_length - n);
-        h->mark += m;
-    }
-    return TRUE;
+    if (p->request.content_length == 0)
+        return PARSING_DONE;
+
+    n = ready(p);
+    if (n == 0)
+        return PARSING_WAIT;
+
+    p->body += n;
+    advance_mark(p, n);
+    return (p->body < p->request.content_length) ?
+            PARSING_WAIT : PARSING_DONE;
 }
 
 /**
@@ -324,48 +400,89 @@ int read_body(struct handler *h) {
  * the request data, identifying GET and HEAD HTTP methods. Most of the
  * data read is actually discarded, in the current implementation.
  */
-void parse_request(struct handler *h) {
-    int method;
+void parse_request(struct parser *p) {
+    int r;
 
-    if (!read_socket(h)) {
-        h->state = ST_ERROR;
+    if(!read_socket(p))
+        return;
+
+    switch (p->state) {
+    case PARSING_START:
+        p->mark = 0;
+        p->state = PARSING_METHOD;
+        debug("parse started");
+
+    case PARSING_METHOD:
+        r = parse_request_method(p);
+        if (r != PARSING_DONE)
+            break;
+        p->state = PARSING_URI;
+        debug("parsed method: %d", p->request.method);
+
+    case PARSING_URI:
+        r = parse_request_uri(p);
+        if (r != PARSING_DONE)
+            break;
+        p->state = PARSING_VERSION;
+        debug("parsed uri");
+
+    case PARSING_VERSION:
+        r = parse_http_version(p);
+        if (r != PARSING_DONE)
+            break;
+        p->state = PARSING_HEADERS;
+        debug("parsed http version");
+
+    case PARSING_HEADERS:
+    case PARSING_HEADER_NAME:
+    case PARSING_HEADER_NAME_ANY:
+    case PARSING_HEADER_VALUE:
+    case PARSING_HEADER_CONTENT_LENGTH:
+        r = parse_headers(p);
+        if (r != PARSING_DONE)
+            break;
+        p->state = PARSING_BODY;
+        debug("parsed headers");
+        debug("content-length: %ld", p->request.content_length);
+
+    case PARSING_BODY:
+        r = parse_body(p);
+        if (r != PARSING_DONE)
+            break;
+        p->state = PARSING_DONE;
+        debug("parsed body");
+        return;
+
+    default:
+        debug("illegal parser state: %d", p->state);
+        p->state = PARSING_ERROR;
+        p->error = E_PARSE;
         return;
     }
 
-    switch (h->state) {
-    default:
-        debug("state: %d", h->state);
-        h->state = ST_END;
+    if (r == PARSING_ERROR) {
+        p->state = PARSING_ERROR;
+        if (p->error == E_NONE)
+            p->error = E_PARSE;
     }
     return;
+}
 
-    method = parse_request_method(h);
-//    if (method == REQ_BAD_HTTP)
-//        return method;
-    debug("parsed method: %d", method);
+void init_parser(struct parser* p) {
+    p->state = PARSING_METHOD;
+    p->error = E_NONE;
 
-//    if (!parse_request_uri(h))
-//        return REQ_BAD_HTTP;
-    debug("parsed URI");
+    p->fd = -1;
+    p->mark = 0;
+    p->body = 0;
+    init_buffer(&(p->buffer));
 
-//    if (!parse_http_version(h))
-//        return REQ_BAD_HTTP;
-    debug("parsed version: %c", h->request.version);
+    p->request.version = '0';
+    p->request.content_length = 0;
+}
 
-//    if (!parse_headers(h))
-//        return REQ_BAD_HTTP;
-    debug("parsed headers");
-
-    debug("content-length: %ld", h->request.content_length);
-
-
-//    if (!read_body(h))
-//        return REQ_BAD_HTTP;
-
-//    if (h->request.content_length > 0)
-//        debug("consumed body");
-
-//    return method;
+void free_parser(struct parser *p) {
+    clear_buffer(&(p->buffer));
 }
 
 #undef ensure_data

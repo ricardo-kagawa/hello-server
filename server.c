@@ -1,88 +1,12 @@
 #include "server.h"
-#include "parser.c"
-
-
-#define E_NONE     0
-#define E_ADDRINFO 1
-#define E_SOCKET   2
-#define E_BIND     3
-#define E_LISTEN   4
-#define E_ACCEPT   5
-#define E_HANDLER  6
 
 #define HTTP_VERSION "HTTP/1."
 #define RESP_200 " 200 OK\r\nContent-Length: 11\r\n\r\nhello world"
 #define RESP_200H " 200 OK\r\nContent-Length: 11\r\n\r\n"
 #define RESP_400 " 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
+#define RESP_500 " 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
 #define RESP_501 " 501 Not Implemented\r\nContent-Length: 0\r\n\r\n"
 
-
-// data types
-
-/**
- * Pool of request handler state.
- */
-struct handler_pool {
-    struct handler handlers[POOL_SIZE];
-    int next;
-};
-
-/**
- * Server state.
- */
-struct server {
-    int socket;
-    struct handler_pool handler_pool;
-};
-
-
-
-/**
- * Outputs a corresponding error message to stderr.
- */
-void error(int cat, int code) {
-    switch (cat) {
-    case E_ADDRINFO:
-        fputs(gai_strerror(code), stderr);
-        break;
-
-    case E_SOCKET:
-        fputs("Failed to open server socket", stderr);
-        switch (code) {
-        case EACCES:
-            fputs(": access denied", stderr);
-            break;
-        case ENOBUFS:
-        case ENOMEM:
-            fputs(": out of memory", stderr);
-            break;
-        }
-        break;
-
-    case E_BIND:
-        fputs("Failed to bind server socket", stderr);
-        switch (code) {
-        case EACCES:
-            fputs(": access denied", stderr);
-            break;
-        case EADDRINUSE:
-            fputs(": address already in use", stderr);
-            break;
-        }
-        break;
-
-    case E_LISTEN:
-        fputs("Failed to listen on server socket", stderr);
-        if (code == EADDRINUSE)
-            fputs(": address already in use", stderr);
-        break;
-
-    case E_HANDLER:
-        fputs("Failed to set custom signal handlers", stderr);
-        break;
-    }
-    fputc('\n', stderr);
-}
 
 /**
  * Calls getaddrinfo(3) with hints suitable for an HTTP server. _service_
@@ -160,52 +84,38 @@ int open_server_socket(char service[]) {
 }
 
 /**
- * Initialized the handler pool. The pool is a linked list of available
- * handlers.
+ * Allocates a handler. If none could be, NULL is returned.
  */
-void init_handler_pool(struct handler_pool *pool) {
-    int i;
-    pool->next = 0;
-    for (i = 0; i < POOL_SIZE - 1; i++)
-        pool->handlers[i].next = i + 1;
-    pool->handlers[POOL_SIZE - 1].next = -1;
+struct handler* new_handler(struct server *server) {
+    struct handler *h;
+
+    if (server->handler_pool == NULL) {
+        if (server->handler_count >= MAX_HANDLERS)
+            return NULL;
+
+        h = (struct handler*) malloc(sizeof(struct handler));
+        if (h == NULL)
+            return NULL;
+
+        server->handler_count++;
+        debug("new request handler: %p", h);
+    } else {
+        h = server->handler_pool;
+        server->handler_pool = h->next;
+        debug("old request handler: %p", h);
+    }
+
+    h->next = NULL;
+    h->pool = server;
+    init_parser(&(h->parser));
+    return h;
 }
 
-/**
- * Retrieves the next free handler. If there is none, NULL is returned.
- */
-struct handler* get_handler(struct handler_pool *pool) {
-    struct handler *r;
-
-    if (pool->next < 0)
-        return NULL;
-
-    r = pool->handlers + pool->next;
-
-    if (r->next >= 0) {
-        pool->next = r->next;
-        r->next = -1;
-    } else
-        pool->next = -1;
-
-    r->request.version = '0';
-    r->request.content_length = 0;
-
-    r->size = 0;
-    r->mark = 0;
-    r->fd = -1;
-
-    return r;
-}
-
-// see header file
-int read_socket(struct handler *h) {
-    debug("reading socket");
-    h->size = read(h->fd, h->data, sizeof(h->data));
-    h->mark = 0;
-
-    debug("%d bytes read", h->size);
-    return (h->size > 0);
+void free_handler(struct handler* h) {
+    free_parser(&(h->parser));
+    h->next = h->pool->handler_pool;
+    h->pool->handler_pool = h;
+    debug("handler returned: %p", h);
 }
 
 /**
@@ -214,35 +124,8 @@ int read_socket(struct handler *h) {
  */
 void write_response(struct handler *h, char resp[], int size) {
     write(h->fd, HTTP_VERSION, sizeof(HTTP_VERSION) - 1);
-    write(h->fd, &(h->request.version), sizeof(char));
+    write(h->fd, &(h->parser.request.version), sizeof(char));
     write(h->fd, resp, size - 1);
-}
-
-/**
- * Handles a new client connection.
- */
-void handle_connection(struct ev_loop *loop, struct server *server, 
-        int socket) {
-    struct handler *h;
-
-    parse_request(h);
-    switch (0) {
-    case REQ_GET:
-        write_response(h, RESP_200, sizeof(RESP_200));
-        return;
-
-    case REQ_HEAD:
-        write_response(h, RESP_200H, sizeof(RESP_200H));
-        return;
-
-    case REQ_BAD_HTTP:
-        write_response(h, RESP_400, sizeof(RESP_400));
-        return;
-
-    case REQ_BAD_METHOD:
-        write_response(h, RESP_501, sizeof(RESP_501));
-        return;
-    }
 }
 
 
@@ -252,6 +135,9 @@ void handle_connection(struct ev_loop *loop, struct server *server,
  * Handles SIGINT by stopping the default event loop.
  */
 static void sigint_cb(struct ev_loop *loop, ev_signal *w, int events) {
+    struct server* server;
+    struct handler *h;
+
     puts("stopping");
     ev_break(loop, EVBREAK_ALL);
 }
@@ -261,19 +147,50 @@ static void sigint_cb(struct ev_loop *loop, ev_signal *w, int events) {
  */
 static void read_cb(struct ev_loop *loop, ev_io *w, int events) {
     struct handler *h;
+    struct parser *p;
 
-    puts("readable");
     h = (struct handler*) w->data;
-    parse_request(h);
+    p = &(h->parser);
 
-    switch (h->state) {
-    case ST_ERROR:
-        debug("read error");
-    case ST_END:
-        ev_io_stop(loop, w);
-        close(h->fd);
-        debug("client disconnected");
+    parse_request(p);
+    switch (p->state) {
+    case PARSING_WAIT:
+        return;
+
+    case PARSING_ERROR:
+        error(p->error, 0);
+        switch (p->error) {
+        case E_READ:
+        case E_PARSE:
+            write_response(h, RESP_400, sizeof(RESP_400));
+            break;
+
+        case E_MEMORY:
+            write_response(h, RESP_500, sizeof(RESP_500));
+            break;
+        }
+        break;
+
+    case PARSING_DONE:
+        switch (p->request.method) {
+        case METHOD_GET:
+            write_response(h, RESP_200, sizeof(RESP_501));
+            break;
+
+        case METHOD_HEAD:
+            write_response(h, RESP_200H, sizeof(RESP_501));
+            break;
+
+        default:
+            write_response(h, RESP_501, sizeof(RESP_501));
+            break;
+        }
     }
+
+    ev_io_stop(loop, w);
+    close(h->fd);
+    debug("client disconnected");
+    free_handler(h);
 }
 
 /**
@@ -286,12 +203,23 @@ static void accept_cb(struct ev_loop *loop, ev_io *w, int events) {
     struct timeval t;
     int fd;
 
-    // accept client connection
+    // check handler pool
 
     server = (struct server*) w->data;
-    fd = accept4(server->socket, NULL, NULL, SOCK_NONBLOCK);
-    if (fd < 0)
+    h = new_handler(server);
+    if (h == NULL) {
+        debug("out of handlers");
+        error(E_MEMORY, 0);
         return;
+    }
+
+    // accept client connection
+
+    fd = accept4(server->socket, NULL, NULL, SOCK_NONBLOCK);
+    if (fd < 0) {
+        free_handler(h);
+        return;
+    }
 
     debug("client connected");
 
@@ -305,8 +233,8 @@ static void accept_cb(struct ev_loop *loop, ev_io *w, int events) {
 
     // configure new handler
 
-    h = get_handler(&(server->handler_pool));
-    h->state = ST_START;
+    h->state = ST_READING;
+    h->parser.fd = fd;
     h->fd = fd;
 
     // configure new watcher
@@ -331,7 +259,8 @@ int main(int argc, char** argv) {
 
     server.socket = open_server_socket(
             (argc > 1) ? argv[1] : DEFAULT_SERVICE);
-    init_handler_pool(&server.handler_pool);
+    server.handler_pool = NULL;
+    server.handler_count = 0;
 
     ev_signal_init(&signal_watcher, sigint_cb, SIGINT);
     ev_io_init(&socket_watcher, accept_cb, server.socket, EV_READ);
