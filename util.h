@@ -62,9 +62,9 @@ void init_buffer(struct buffer*);
  */
 void clear_buffer(struct buffer*);
 
-void buffer_debug(struct buffer*);
-
 int buffer_append(struct buffer*, char[], int);
+
+int buffer_append_char(struct buffer*, char);
 
 char buffer_get(struct buffer*, int);
 
@@ -88,6 +88,14 @@ int buffer_istarts_with(struct buffer*, int, const char[], int);
 char* buffer_copy(struct buffer*, int, int);
 
 int buffer_shift(struct buffer*);
+
+int buffer_write(struct buffer*, int, int);
+
+#ifdef DEBUG
+void buffer_debug(struct buffer*);
+#else
+#define buffer_debug(b) do {} while (0)
+#endif
 
 #endif
 

@@ -20,8 +20,14 @@
 
 #include "errors.h"
 #include "parser.h"
+#include "util.h"
 
 // data types
+
+struct response {
+    struct buffer data;
+    int mark;
+};
 
 /**
  * Request handler state.
@@ -33,6 +39,7 @@ struct handler {
     struct handler* next;
     struct ev_io watcher;
     struct parser parser;
+    struct response response;
     int fd;
 };
 

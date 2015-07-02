@@ -51,6 +51,10 @@ void error(int err, int code) {
         fputs("Could not parse request", stderr);
         break;
 
+    case E_WRITE:
+        fputs("Could not write response", stderr);
+        break;
+
     default:
         fprintf(stderr, "Unknown error: %d", err);
         break;

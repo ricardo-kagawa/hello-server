@@ -1,11 +1,11 @@
 #include "server.h"
 
 #define HTTP_VERSION "HTTP/1."
-#define RESP_200 " 200 OK\r\nContent-Length: 11\r\n\r\nhello world"
-#define RESP_200H " 200 OK\r\nContent-Length: 11\r\n\r\n"
-#define RESP_400 " 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
-#define RESP_500 " 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
-#define RESP_501 " 501 Not Implemented\r\nContent-Length: 0\r\n\r\n"
+#define CONTENT_LENGTH "Content-Length: "
+#define RESP_200 " 200 OK\r\n"
+#define RESP_400 " 400 Bad Request\r\n"
+#define RESP_500 " 500 Internal Server Error\r\n"
+#define RESP_501 " 501 Not Implemented\r\n"
 
 
 /**
@@ -108,24 +108,92 @@ struct handler* new_handler(struct server *server) {
     h->next = NULL;
     h->pool = server;
     init_parser(&(h->parser));
+    init_buffer(&(h->response.data));
+    h->response.mark = 0;
     return h;
 }
 
 void free_handler(struct handler* h) {
-    free_parser(&(h->parser));
     h->next = h->pool->handler_pool;
     h->pool->handler_pool = h;
+    clear_buffer(&(h->response.data));
     debug("handler returned: %p", h);
 }
 
-/**
- * Writes the given response with size bytes to the socket pointed to by req.
- * The corresponding HTTP minor version in req is written to the response.
- */
-void write_response(struct handler *h, char resp[], int size) {
-    write(h->fd, HTTP_VERSION, sizeof(HTTP_VERSION) - 1);
-    write(h->fd, &(h->parser.request.version), sizeof(char));
-    write(h->fd, resp, size - 1);
+int build_response(struct handler *h) {
+    struct buffer *resp;
+    struct parser *p;
+    int r;
+
+    p = &(h->parser);
+    resp = &(h->response.data);
+
+
+    // protocol and version
+
+    r = buffer_append(resp, HTTP_VERSION, sizeof(HTTP_VERSION) - 1);
+    r = r && buffer_append_char(resp, p->request.version);
+
+
+    // status line
+
+    switch (p->state) {
+    case PARSING_ERROR:
+        error(p->error, 0);
+        h->error = p->error;
+        switch (p->error) {
+        case E_READ:
+        case E_PARSE:
+            r = r && buffer_append(resp, RESP_400, sizeof(RESP_400) - 1);
+            break;
+
+        case E_MEMORY:
+            r = r && buffer_append(resp, RESP_500, sizeof(RESP_500) - 1);
+            break;
+        }
+        break;
+
+    case PARSING_DONE:
+        switch (p->request.method) {
+        case METHOD_GET:
+        case METHOD_HEAD:
+            r = r && buffer_append(resp, RESP_200, sizeof(RESP_200) - 1);
+            break;
+
+        default:
+            r = r && buffer_append(resp, RESP_501, sizeof(RESP_501) - 1);
+            break;
+        }
+    }
+
+
+    // content-length
+
+    r = r && buffer_append(resp, CONTENT_LENGTH, sizeof(CONTENT_LENGTH) - 1);
+    if (p->state == PARSING_DONE && p->request.method != METHOD_OTHER) {
+        r = r && buffer_append(resp, "11\r\n", 4);
+    } else
+        r = r && buffer_append(resp, "0\r\n", 3);
+
+
+    // response body
+
+    r = r && buffer_append(resp, "\r\n", 2);
+    if (p->state == PARSING_DONE && p->request.method == METHOD_GET) {
+        r = r && buffer_append(resp, "hello world", 11);
+    }
+
+
+    // footer
+
+    if (!r) {
+        h->state = ST_ERROR;
+        h->error = E_MEMORY;
+        return FALSE;
+    } else {
+        debug("response built");
+        return TRUE;
+    }
 }
 
 
@@ -142,6 +210,28 @@ static void sigint_cb(struct ev_loop *loop, ev_signal *w, int events) {
     ev_break(loop, EVBREAK_ALL);
 }
 
+static void write_cb(struct ev_loop *loop, ev_io *w, int events) {
+    struct handler *h;
+    struct buffer *b;
+    int n;
+
+    h = (struct handler*) w->data;
+    b = &(h->response.data);
+
+    h->response.mark += buffer_write(b, h->response.mark, h->fd);
+    if (errno == 0 && b->size - h->response.mark > 0) {
+        return;
+    } else if (errno != 0) {
+        error(E_WRITE, errno);
+    } else
+        debug("response written");
+
+    ev_io_stop(loop, w);
+    close(h->fd);
+    debug("client disconnected");
+    free_handler(h);
+}
+
 /**
  * Handles input events from client sockets.
  */
@@ -153,44 +243,39 @@ static void read_cb(struct ev_loop *loop, ev_io *w, int events) {
     p = &(h->parser);
 
     parse_request(p);
-    switch (p->state) {
-    case PARSING_WAIT:
+    if (p->state == PARSING_WAIT) {
         return;
-
-    case PARSING_ERROR:
-        error(p->error, 0);
-        switch (p->error) {
-        case E_READ:
-        case E_PARSE:
-            write_response(h, RESP_400, sizeof(RESP_400));
-            break;
-
-        case E_MEMORY:
-            write_response(h, RESP_500, sizeof(RESP_500));
-            break;
-        }
-        break;
-
-    case PARSING_DONE:
-        switch (p->request.method) {
-        case METHOD_GET:
-            write_response(h, RESP_200, sizeof(RESP_501));
-            break;
-
-        case METHOD_HEAD:
-            write_response(h, RESP_200H, sizeof(RESP_501));
-            break;
-
-        default:
-            write_response(h, RESP_501, sizeof(RESP_501));
-            break;
-        }
     }
 
     ev_io_stop(loop, w);
-    close(h->fd);
-    debug("client disconnected");
-    free_handler(h);
+    if (p->state == PARSING_ERROR && p->error == E_MEMORY) {
+        free_parser(&(h->parser));
+        close(h->fd);
+
+        error(p->error, 0);
+        debug("client disconnected");
+        free_handler(h);
+        return;
+    }
+
+    debug("request processed");
+
+    if (!build_response(h)) {
+        free_parser(&(h->parser));
+        close(h->fd);
+
+        error(h->error, 0);
+        debug("client disconnected");
+        free_handler(h);
+        return;
+    }
+
+    h->state = ST_WRITING;
+    free_parser(&(h->parser));
+
+    ev_io_init(w, write_cb, h->fd, EV_WRITE);
+    w->data = h;
+    ev_io_start(loop, w);
 }
 
 /**
@@ -234,6 +319,7 @@ static void accept_cb(struct ev_loop *loop, ev_io *w, int events) {
     // configure new handler
 
     h->state = ST_READING;
+    h->error = E_NONE;
     h->parser.fd = fd;
     h->fd = fd;
 

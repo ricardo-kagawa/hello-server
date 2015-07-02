@@ -1,4 +1,6 @@
+#include <errno.h>
 #include "util.h"
+
 
 // see header file
 void init_buffer(struct buffer *b) {
@@ -19,53 +21,33 @@ void clear_buffer(struct buffer *b) {
         if (chunk_pool.size < MAX_BUFFERS) {
             c->next = chunk_pool.pool;
             chunk_pool.pool = c;
+            chunk_pool.size++;
         } else
             free(c);
     }
 }
 
-void buffer_debug(struct buffer *b) {
-    #ifdef DEBUG
-    struct chunk* p;
-    int i, n;
-    char c;
+struct chunk* new_chunk() {
+    struct chunk *p;
 
-    printf("size=%d,data=[", b->size);
-    for (p = b->head; p != NULL; p = p->next) {
-        n = (p->next == NULL) ? b->tsize : BUFFER_SIZE;
-        for (i = 0; i < n; i++) {
-            c = p->data[i];
-            if (!isprint(c)) {
-                putchar('\\');
-                switch(c) {
-                case '\r':
-                    putchar('r');
-                    break;
-                case '\n':
-                    putchar('n');
-                    putchar('\n');
-                    break;
-                default:
-                    putchar('?');
-                }
-            } else
-                putchar(c);
-        }
-    }
-    putchar(']');
-    putchar('\n');
-    #endif
+    if (chunk_pool.pool != NULL) {
+        p = chunk_pool.pool;
+        chunk_pool.pool = p->next;
+        chunk_pool.size--;
+    } else
+        p = (struct chunk*) malloc(sizeof(struct chunk));
+
+    p->next = NULL;
+    return p;
 }
 
 int buffer_append(struct buffer *b, char data[], int n) {
     int m, p;
 
     if (b->head == NULL) {
-        b->tail = (struct chunk*) malloc(sizeof(struct chunk));
+        b->tail = new_chunk();
         if (b->tail == NULL)
             return FALSE;
-
-        b->tail->next = NULL;
         b->head = b->tail;
     }
 
@@ -76,18 +58,37 @@ int buffer_append(struct buffer *b, char data[], int n) {
         p += m;
 
         m = BUFFER_SIZE;
-        b->tail->next = (struct chunk*) malloc(sizeof(struct chunk));
+        b->tail->next = new_chunk();
         if (b->tail->next == NULL)
             return FALSE;
 
         b->tail = b->tail->next;
-        b->tail->next = NULL;
         b->tsize = 0;
     }
 
     memcpy(b->tail->data + b->tsize, data + p, n - p);
     b->tsize += n - p;
     b->size += n;
+    return TRUE;
+}
+
+int buffer_append_char(struct buffer *b, char c) {
+    if (b->head == NULL) {
+        b->tail = new_chunk();
+        if (b->tail == NULL)
+            return FALSE;
+        b->head = b->tail;
+    } else if (BUFFER_SIZE - b->tsize == 0) {
+        b->tail->next = new_chunk();
+        if (b->tail->next == NULL)
+            return FALSE;
+        b->tail = b->tail->next;
+        b->tsize = 0;
+    }
+
+    b->tail->data[b->tsize] = c;
+    b->tsize++;
+    b->size++;
     return TRUE;
 }
 
@@ -269,4 +270,94 @@ int buffer_shift(struct buffer *b) {
     }
     return r;
 }
+
+int buffer_write(struct buffer *b, int p, int fd) {
+    struct chunk *c;
+    int i, k, k0, k1, m, r;
+    char* data;
+
+    errno = 0;
+    if (b->size - p  == 0)
+        return TRUE;
+
+    k0 = p / BUFFER_SIZE;
+    k1 = (p + b->size) / BUFFER_SIZE;
+
+    // skip offset
+
+    c = b->head;
+    for (i = 0; i < k0; i++)
+        c = c->next;
+
+    if (k0 == k1) {
+        // everything is in a single chunk
+        r = write(fd, c->data + p % BUFFER_SIZE, b->size);
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            errno = 0;
+        return r;
+    }
+
+    // copy end of first chunk
+
+    k = p % BUFFER_SIZE;
+    r = write(fd, c->data + k, BUFFER_SIZE - k);
+    if (errno != 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            errno = 0;
+        return r;
+    }
+    c = c->next;
+
+    // intermediate chunks
+
+    for (m = k; b->size - m > BUFFER_SIZE; m += BUFFER_SIZE) {
+        r = write(fd, c->data, BUFFER_SIZE);
+        if (errno != 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                errno = 0;
+            return r;
+        }
+        c = c->next;
+    }
+
+    // start of last chunk
+
+    r = write(fd, c->data, b->size - m);
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+        errno = 0;
+    return r;
+}
+
+#ifdef DEBUG
+void buffer_debug(struct buffer *b) {
+    struct chunk* p;
+    int i, n;
+    char c;
+
+    printf("size=%d,data=[", b->size);
+    for (p = b->head; p != NULL; p = p->next) {
+        n = (p->next == NULL) ? b->tsize : BUFFER_SIZE;
+        for (i = 0; i < n; i++) {
+            c = p->data[i];
+            if (!isprint(c)) {
+                putchar('\\');
+                switch(c) {
+                case '\r':
+                    putchar('r');
+                    break;
+                case '\n':
+                    putchar('n');
+                    putchar('\n');
+                    break;
+                default:
+                    putchar('?');
+                }
+            } else
+                putchar(c);
+        }
+    }
+    putchar(']');
+    putchar('\n');
+}
+#endif
 

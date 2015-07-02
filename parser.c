@@ -354,7 +354,6 @@ int parse_headers(struct parser *p) {
             debug("parsed header name");
         }
 
-        debug("parser state=%d", p->state);
         switch (p->state) {
         case PARSING_HEADER_VALUE:
             r = parse_header_value(p);

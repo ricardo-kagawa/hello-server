@@ -24,6 +24,7 @@
 
 #define E_READ      6
 #define E_PARSE     7
+#define E_WRITE     8
 
 
 /**
